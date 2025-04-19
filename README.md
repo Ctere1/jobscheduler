@@ -4,12 +4,12 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/Ctere1/jobscheduler)](https://goreportcard.com/report/github.com/Ctere1/jobscheduler)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A robust, PostgreSQL-backed job scheduler for Go applications with cron-style scheduling, concurrency control, and timeout handling.
+A robust, GO-ORM-based job scheduler for running jobs at specified intervals. This library is designed to be simple, efficient, and easy to integrate into your Go applications.
 
 ## Features
 
 - 🕒 **Cron-style scheduling** using standard cron expressions  
-- 💾 **PostgreSQL persistence** for job durability across restarts  
+- 💾 **Data persistence** with GORM, supporting various databases (PostgreSQL, MySQL, SQLite, etc.) 	 	 		 	 	 
 - 🚦 **Concurrency control** with configurable job limits  
 - ⏱️ **Timeout handling** for long-running jobs  
 - 📊 **Job monitoring** with execution history and metrics  
