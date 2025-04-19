@@ -15,17 +15,17 @@ import (
 
 // Scheduler manages job scheduling and execution
 type Scheduler struct {
-	cron       *cron.Cron
-	storage    Storage
-	config     Config
-	jobChannel chan struct{}
-	funcMap    map[string]any
-	funcMu     sync.RWMutex
-	jobLocks   map[uint]*sync.Mutex
-	jobLockMu  sync.Mutex
-	jobMap     map[cron.EntryID]uint
-	mapMutex   sync.RWMutex
-	webUI      *WebUI
+	cron      *cron.Cron
+	storage   Storage
+	config    Config
+	semaphore chan struct{}
+	funcMap   map[string]any
+	funcMu    sync.RWMutex
+	jobLocks  map[uint]*sync.Mutex
+	jobLockMu sync.Mutex
+	jobMap    map[cron.EntryID]uint
+	mapMutex  sync.RWMutex
+	webUI     *WebUI
 }
 
 // New creates a new Scheduler instance
@@ -46,13 +46,13 @@ func New(db *gorm.DB, config Config) (*Scheduler, error) {
 
 	// Create scheduler instance
 	s := &Scheduler{
-		cron:       cron.New(cron.WithChain(cron.Recover(cron.DefaultLogger))),
-		storage:    storage,
-		config:     config,
-		jobChannel: make(chan struct{}, config.MaxConcurrentJobs),
-		funcMap:    make(map[string]any),
-		jobLocks:   make(map[uint]*sync.Mutex),
-		jobMap:     make(map[cron.EntryID]uint),
+		cron:      cron.New(cron.WithChain(cron.Recover(cron.DefaultLogger))),
+		storage:   storage,
+		config:    config,
+		semaphore: make(chan struct{}, config.MaxConcurrentJobs),
+		funcMap:   make(map[string]any),
+		jobLocks:  make(map[uint]*sync.Mutex),
+		jobMap:    make(map[cron.EntryID]uint),
 	}
 
 	// Restore existing jobs from storage
@@ -212,9 +212,9 @@ func (s *Scheduler) RunNow(identifier any) error {
 	}
 
 	select {
-	case s.jobChannel <- struct{}{}:
+	case s.semaphore <- struct{}{}:
 		go func() {
-			defer func() { <-s.jobChannel }()
+			defer func() { <-s.semaphore }()
 			s.createJobFunc(job)()
 		}()
 		return nil
@@ -298,8 +298,8 @@ func (s *Scheduler) scheduleJob(job *Job) error {
 
 func (s *Scheduler) createJobFunc(job *Job) func() {
 	return func() {
-		s.jobChannel <- struct{}{}
-		defer func() { <-s.jobChannel }()
+		s.semaphore <- struct{}{}
+		defer func() { <-s.semaphore }()
 
 		jobLock := s.getJobLock(job.ID)
 		jobLock.Lock()

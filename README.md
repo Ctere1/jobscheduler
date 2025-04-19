@@ -4,31 +4,34 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/Ctere1/jobscheduler)](https://goreportcard.com/report/github.com/Ctere1/jobscheduler)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A robust, GO-ORM-based job scheduler for running jobs at specified intervals. This library is designed to be simple, efficient, and easy to integrate into your Go applications.
+A lightweight, persistent, and concurrency-aware job scheduler for Go.  
+Designed to register, schedule, execute, and manage cron-based jobs with metadata, optional web UI, and persistent storage.
 
-## Features
+> ✅ Built with `gorm`, `robfig/cron/v3`, and designed to be integrated into any Go application as a library.
 
-- 🕒 **Cron-style scheduling** using standard cron expressions  
-- 💾 **Data persistence** with GORM, supporting various databases (PostgreSQL, MySQL, SQLite, etc.) 	 	 		 	 	 
-- 🚦 **Concurrency control** with configurable job limits  
-- ⏱️ **Timeout handling** for long-running jobs  
-- 📊 **Job monitoring** with execution history and metrics  
-- 🔄 **Automatic recovery** of scheduled jobs on restart  
-- 🔒 **Thread-safe** implementation  
+## ✨ Features
 
-## Installation
+- ⏰ Cron-based job scheduling  
+- 💾 Persistent storage (via GORM)  
+- 🔁 Automatic job restoration on restart  
+- 🔒 Concurrency control via semaphore  
+- 🧠 Reflection-based function registration  
+- 🧩 Idempotent job definitions (safe to call on each boot)  
+- 📈 Job execution tracking (status, latency, failure count)  
+- 🖥️ Optional web-based UI for monitoring (toggle via config)  
+
+## 📦 Installation
 
 ```bash
 go get github.com/Ctere1/jobscheduler
 ```
 
-## Quick Start
-```go
-package main
+## ⚙️ Initialization Example
 
+```go
 import (
-	"fmt"
 	"time"
+	"log"
 
 	"github.com/Ctere1/jobscheduler"
 	"gorm.io/driver/postgres"
@@ -36,126 +39,147 @@ import (
 )
 
 func main() {
-	// Initialize database connection
 	dsn := "host=localhost user=postgres password=postgres dbname=jobscheduler port=5432 sslmode=disable"
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		panic("failed to connect database")
 	}
 
-	// Create scheduler
 	scheduler, err := jobscheduler.New(db, jobscheduler.Config{
 		MaxConcurrentJobs: 5,
 		JobTimeout:        30 * time.Second,
+		EnableWebUI:       true,
+		WebListen:         "127.0.0.1:8080",
 	})
 	if err != nil {
-		panic(err)
-	}
-	defer scheduler.Stop()
-
-	// Define job function
-	helloJob := func() {
-		fmt.Println("Hello from scheduled job at", time.Now())
+		log.Fatal(err)
 	}
 
-	// Schedule job to run every minute
-	job, err := scheduler.Schedule(
-		"hello-job",
-		"* * * * *",
-		helloJob,
-		nil,
-	)
-	if err != nil {
-		panic(err)
-	}
+	scheduler.Schedule("daily-cleanup", "0 3 * * *", cleanupTask, nil)
 
-	fmt.Printf("Scheduled job with ID: %s\n", job.JobID)
-
-	// Keep program running
 	select {}
+}
+
+func cleanupTask() {
+	log.Println("Running cleanup...")
 }
 ```
 
-## Documentation
+## 🧠 How It Works
 
-For detailed documentation, including configuration options and advanced usage, please refer to the [GoDoc](https://pkg.go.dev/github.com/Ctere1/jobscheduler) page.
+### 1. Job Registration
 
-## Configuration
+Jobs are registered with a name, cron spec, function, and optional metadata.  
+The function is registered using reflection and stored by name.
+
+### 2. Persistence
+
+All jobs are persisted to the database (`gorm`-compatible) using the `Job` model.  
+On startup, jobs are restored and scheduled automatically.
+
+### 3. Concurrency Control
+
+Job concurrency is managed using a buffered channel (`chan struct{}`) as a **semaphore**.  
+This allows you to set the maximum number of parallel jobs via `MaxConcurrentJobs`.
+
+### 4. Timeouts
+
+Jobs can have a maximum execution time.  
+If they exceed `JobTimeout`, they are marked as failed.
+
+### 5. Rescheduling
+
+Calling `Schedule()` on a job with the same name updates the cron spec/metadata if it already exists — making boot-time job declarations **safe and idempotent**.
+
+
+## 🔧 Configuration
 
 The scheduler can be configured using the `Config` struct. Here are the available options:
 - `MaxConcurrentJobs`: Maximum number of jobs that can run concurrently. Default is 5.
 - `JobTimeout`: Maximum time a job can run before being terminated. Default is 30 seconds.
+- `EnableWebUI`: Enable or disable the built-in web UI. Default is false.
+- `WebListen`: Address for the web UI to listen on. Default is "127.0.0.1:8080".
 
 ```go
 scheduler, err := jobscheduler.New(db, jobscheduler.Config{
-    MaxConcurrentJobs: 10,
-    JobTimeout:        1 * time.Minute,
+    MaxConcurrentJobs: 5,
+    JobTimeout:        30 * time.Second,
+	EnableWebUI:       false,
+	WebListen:         "127.0.0.1:8080"
 })
 ```
 
-## API Overview
+## 🛠️ API Overview
 
-### Core Methods
-- `New(db *gorm.DB, config Config) (*Scheduler, error)`: Creates a new job scheduler instance.
-- `Schedule(name, spec string, function any, metadata map[string]any)`: Schedules a new job.
-- `Reschedule(identifier any, newSpec string, newMetadata map[string]any)`: Reschedules an existing job.
-- `Unschedule(identifier any)`: Unschedules a job.
-- `GetJob(identifier any)`: Retrieves a job by its identifier.
-- `ListJobs() ([]Job, error)`: Lists all scheduled jobs.
-- `RunNow(identifier any)`: Runs a job immediately.
-- `Stop()`: Stops the scheduler.
-
-### Job Model
-
-- `JobID`: Unique identifier for the job.
-- `Name`: Name of the job.
-- `Spec`: Cron expression for scheduling.
-- `Status`: Current status of the job (e.g., "scheduled", "running", "completed").
-- `LastRun`: Timestamp of the last run.
-- `NextRun`: Timestamp of the next scheduled run.
-- `RunCount`: Number of times the job has run.
-- `SuccessCount`: Number of successful runs.
-- `FailureCount`: Number of failed runs.
-- `Payload`: Additional metadata associated with the job.
-- `Latency`: Time taken for the job to complete.
+| Method       | Description                                  |
+|--------------|----------------------------------------------|
+| Schedule     | Register a new job (or reschedule if exists) |
+| Reschedule   | Update the schedule and metadata             |
+| Unschedule   | Remove the job from DB and cron              |
+| RunNow       | Run job immediately                          |
+| ListJobs     | Retrieve all jobs                            |
+| GetJob       | Lookup job by ID or name                     |
+| Stop         | Stop the scheduler                           |
 
 
-## Examples
-
-### Scheduling different types of jobs
+## 🧩 Example: Multiple Jobs
 
 ```go
-// Daily report
-scheduler.Schedule(
-	"daily-report",
-	"0 9 * * *", // 9:00 AM daily
-	generateDailyReport,
-	map[string]interface{}{
-		"recipients": []string{"team@example.com"},
-	},
-)
+scheduler.Schedule("hello", "*/5 * * * *", func() {
+	fmt.Println("Hello from job!")
+}, nil)
 
-// Frequent cleanup
-scheduler.Schedule(
-	"cleanup",
-	"*/15 * * * *", // Every 15 minutes
-	cleanupResources,
-	nil,
-)
-    
-```
+scheduler.Schedule("system-metrics", "0 */1 * * *", collectMetrics, map[string]any{
+	"source": "agent",
+})
 
-### Monitoring jobs
-
-```go
 jobs, _ := scheduler.ListJobs()
 for _, job := range jobs {
 	if job.FailCount > 0 {
-		fmt.Printf("Job %s failed %d times. Last error: %s\n",
-			job.Name, job.FailCount, job.LastError)
+		fmt.Printf("Job %s failed %d times. Last error: %s\n", 
+		job.Name, job.FailCount, job.LastError)
 	}
 }
 ```
+
+## 📘 Job Model Schema
+
+Internally, jobs are stored with the following fields:
+
+- `JobID`: UUID  
+- `Name`: Unique job name  
+- `Spec`: Cron expression  
+- `Payload.Func`: Registered function name (via reflection)  
+- `Payload.Data`: Metadata map  
+- `Status`: Scheduled / Running / Success / Failed  
+- `RunCount`: Total runs  
+- `SuccessCount`: Successful runs  
+- `FailCount`: Failed runs  
+- `LastError`: Error from last failure (if any)  
+- `LastRun`: Timestamp of last run  
+- `NextRun`: Timestamp of next run (auto-calculated)  
+- `Latency`: Duration of last execution in milliseconds  
+
+
+## 🖥️ Optional Web UI
+
+If `EnableWebUI` is set to `true`, a basic web dashboard is served.
+
+```go
+Config{
+	EnableWebUI: true,
+	WebListen:   "127.0.0.1:8080",
+}
+```
+
+This dashboard provides:
+- Job list and status  
+- Next/last run timestamps  
+- Run/fail counts  
+
+## Documentation
+
+For detailed documentation, including configuration options and advanced usage, please refer to the [GoDoc](https://pkg.go.dev/github.com/Ctere1/jobscheduler) page.
 
 ## Contributing
 
@@ -164,7 +188,3 @@ Contributions are welcome! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) fo
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
-
-
-
