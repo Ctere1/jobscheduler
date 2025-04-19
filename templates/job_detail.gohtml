@@ -1,0 +1,28 @@
+<div class="job-detail-card" style="padding: 20px; border: 1px solid #ddd; border-radius: 8px; margin-top: 20px;">
+    <h2>{{.Job.Name}}</h2>
+    <p><strong>Status:</strong> {{.Job.Status}}</p>
+    <p><strong>Job ID:</strong> {{.Job.JobID}}</p>
+    {{/* <p><strong>Schedule:</strong> {{.Job.Schedule}}</p> */}}
+    <p><strong>Next Run:</strong> {{.Job.NextRun.Format "2006-01-02 15:04:05"}}</p>
+    <p><strong>Last Run:</strong> {{.Job.LastRun.Format "2006-01-02 15:04:05"}}</p>
+    <p><strong>Run Count:</strong> {{.Job.RunCount}}</p>
+    <p><strong>Successes:</strong> {{.Job.SuccessCount}}</p>
+    <p><strong>Failures:</strong> {{.Job.FailCount}}</p>
+    <p><strong>Timeout:</strong> {{.Job.Latency}} milliseconds</p>
+
+    <div style="margin-top: 20px;">
+        <button 
+            hx-post="/api/jobs/{{.Job.JobID}}/run" 
+            hx-swap="none"
+            style="padding: 8px 16px; background-color: #1890ff; color: white; border: none; border-radius: 4px; cursor: pointer;">
+            Run Now
+        </button>
+
+        <button 
+            hx-post="/api/jobs/{{.Job.JobID}}/unschedule"
+            hx-swap="none"
+            style="padding: 8px 16px; background-color: #f5222d; color: white; border: none; border-radius: 4px; margin-left: 10px; cursor: pointer;">
+            Unschedule
+        </button>
+    </div>
+</div>

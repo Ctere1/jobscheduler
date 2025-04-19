@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Job Scheduler Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.0"></script>
+
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f7fa;
+            color: #333;
+        }
+
+        h1, h2 {
+            color: #2c3e50;
+        }
+
+        .container {
+            display: flex;
+            gap: 30px;
+        }
+
+        .stats, .job-section {
+            background: #fff;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        }
+
+        .stats {
+            flex: 1;
+            min-width: 250px;
+        }
+
+        .job-section {
+            flex: 3;
+        }
+
+        .job-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 15px;
+        }
+
+        .job-card {
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 15px;
+            transition: box-shadow 0.2s ease;
+            cursor: pointer;
+        }
+
+        .job-card:hover {
+            box-shadow: 0 0 10px rgba(0,0,0,0.05);
+        }
+
+        .job-running { background-color: #e6f7ff; }
+        .job-success { background-color: #f6ffed; }
+        .job-failed { background-color: #fff2f0; }
+
+        .job-card button {
+            margin-top: 10px;
+            background: #1890ff;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        .job-card button:hover {
+            background: #1677cc;
+        }
+
+        #job-detail {
+            margin-top: 30px;
+            padding: 15px;
+            background: #fff;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        }
+    </style>
+</head>
+<body>
+    <h1>📊 Job Scheduler Dashboard</h1>
+    
+    <div class="container">
+        <!-- Sidebar Stats -->
+        <div class="stats">
+            <h2>Stats</h2>
+            <div>
+                <strong>Total Jobs:</strong> {{len .Jobs}}<br>
+                <strong>Running:</strong> {{.JobCounts.running}}<br>
+                <strong>Success:</strong> {{.JobCounts.success}}<br>
+                <strong>Failed:</strong> {{.JobCounts.failed}}
+            </div>
+            <canvas id="jobChart" width="200" height="200" style="margin-top: 20px;"></canvas>
+        </div>
+
+        <!-- Jobs -->
+        <div class="job-section">
+            <h2>Jobs</h2>
+            <div class="job-grid" id="job-list" hx-get="/partials/jobs" hx-trigger="every 5s">
+                {{range .Jobs}}
+                <div class="job-card job-{{.Status}}" 
+                     hx-get="/jobs/{{.JobID}}" 
+                     hx-target="#job-detail">
+                    <strong>{{.Name}}</strong><br>
+                    <small>Status:</small> <strong>{{.Status}}</strong><br>
+                    <small>Next Run:</small> {{.NextRun.Format "2006-01-02 15:04:05"}}<br>
+                    <button hx-post="/api/jobs/{{.JobID}}/run">▶ Run Now</button>
+                </div>
+                {{end}}
+            </div>
+
+            <!-- Job Details -->
+            <div id="job-detail">
+                <em>Select a job to view details</em>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const ctx = document.getElementById('jobChart');
+        const jobChart = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: ['Running', 'Success', 'Failed'],
+                datasets: [{
+                    data: [
+                        {{.JobCounts.running}}, 
+                        {{.JobCounts.success}}, 
+                        {{.JobCounts.failed}}
+                    ],
+                    backgroundColor: ['#1890ff', '#52c41a', '#f5222d'],
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                plugins: {
+                    legend: {
+                        position: 'bottom'
+                    }
+                }
+            }
+        });
+    
+        // 🔄 Auto-refresh job counts every 5s
+        setInterval(() => {
+            fetch('/api/job-counts')
+                .then(res => res.json())
+                .then(data => {
+                    jobChart.data.datasets[0].data = [
+                        data.running || 0,
+                        data.success || 0,
+                        data.failed || 0
+                    ];
+                    jobChart.update();
+                })
+                .catch(err => console.error("Error updating chart:", err));
+        }, 5000);
+    </script>
+    
+</body>
+</html>

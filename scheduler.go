@@ -3,67 +3,77 @@ package jobscheduler
 import (
 	"context"
 	"errors"
-	"fmt"
 	"reflect"
 	"runtime"
 	"sync"
 	"time"
 
-	"github.com/Ctere1/jobscheduler/models"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 	"gorm.io/gorm"
 )
 
-type Config struct {
-	MaxConcurrentJobs int
-	JobTimeout        time.Duration
-}
-
+// Scheduler manages job scheduling and execution
 type Scheduler struct {
-	db         *gorm.DB
 	cron       *cron.Cron
-	jobMap     map[cron.EntryID]uint // entryID -> job DB ID
-	mapMutex   sync.RWMutex
+	storage    Storage
+	config     Config
 	jobChannel chan struct{}
-	timeout    time.Duration
 	funcMap    map[string]any
 	funcMu     sync.RWMutex
 	jobLocks   map[uint]*sync.Mutex
 	jobLockMu  sync.Mutex
+	jobMap     map[cron.EntryID]uint
+	mapMutex   sync.RWMutex
+	webUI      *WebUI
 }
 
+// New creates a new Scheduler instance
 func New(db *gorm.DB, config Config) (*Scheduler, error) {
+	// Apply default values if not set
 	if config.MaxConcurrentJobs <= 0 {
-		config.MaxConcurrentJobs = 10
+		config.MaxConcurrentJobs = DefaultMaxConcurrentJobs
 	}
 	if config.JobTimeout <= 0 {
-		config.JobTimeout = 30 * time.Second
+		config.JobTimeout = DefaultJobTimeout
 	}
 
-	if err := db.AutoMigrate(&models.Job{}); err != nil {
-		return nil, fmt.Errorf("failed to migrate database: %w", err)
+	// Initialize storage
+	storage := newGormStorage(db)
+	if err := db.AutoMigrate(&Job{}); err != nil {
+		return nil, err
 	}
 
-	r := &Scheduler{
-		db:         db,
+	// Create scheduler instance
+	s := &Scheduler{
 		cron:       cron.New(cron.WithChain(cron.Recover(cron.DefaultLogger))),
-		jobMap:     make(map[cron.EntryID]uint),
+		storage:    storage,
+		config:     config,
 		jobChannel: make(chan struct{}, config.MaxConcurrentJobs),
-		timeout:    config.JobTimeout,
 		funcMap:    make(map[string]any),
 		jobLocks:   make(map[uint]*sync.Mutex),
+		jobMap:     make(map[cron.EntryID]uint),
 	}
 
-	if err := r.restoreJobs(); err != nil {
-		return nil, fmt.Errorf("failed to restore jobs: %w", err)
+	// Restore existing jobs from storage
+	if err := s.restoreJobs(); err != nil {
+		return nil, err
 	}
 
-	r.cron.Start()
-	return r, nil
+	// Start the cron scheduler
+	s.cron.Start()
+
+	// Start web UI if enabled
+	if config.EnableWebUI {
+		s.webUI = NewWebUI(s)
+		go s.webUI.Start(config.WebListen)
+	}
+
+	return s, nil
 }
 
-func (r *Scheduler) Schedule(name, spec string, function any, metadata map[string]any) (*models.Job, error) {
+// Schedule creates and schedules a new job
+func (s *Scheduler) Schedule(name, spec string, function any, metadata map[string]any) (*Job, error) {
 	// Input validation
 	if name == "" {
 		return nil, ErrJobNameEmpty
@@ -74,7 +84,7 @@ func (r *Scheduler) Schedule(name, spec string, function any, metadata map[strin
 
 	// Validate cron spec
 	if _, err := cron.ParseStandard(spec); err != nil {
-		return nil, fmt.Errorf("invalid cron expression: %w", err)
+		return nil, err
 	}
 
 	// Get function info
@@ -89,62 +99,62 @@ func (r *Scheduler) Schedule(name, spec string, function any, metadata map[strin
 	}
 
 	// Register function
-	r.registerFunction(funcName, function)
+	s.registerFunction(funcName, function)
 
-	// Check if job with same name already exists
-	existingJob, err := r.getJobByIdentifier(name)
+	// Check for existing job with same name
+	existingJob, err := s.getJobByIdentifier(name)
 	if err == nil {
 		oldFuncName := existingJob.Payload.Func
 		if oldFuncName != funcName {
-			// Reschedule the job with new function
-			updatedJob, err := r.Reschedule(existingJob.JobID, spec, metadata)
+			// Reschedule with new function
+			updatedJob, err := s.Reschedule(existingJob.JobID, spec, metadata)
 			if err == nil {
-				r.funcMu.Lock()
-				delete(r.funcMap, oldFuncName)
-				r.funcMu.Unlock()
+				s.funcMu.Lock()
+				delete(s.funcMap, oldFuncName)
+				s.funcMu.Unlock()
 			}
 			return updatedJob, err
 		}
-		return r.Reschedule(existingJob.JobID, spec, metadata)
+		return s.Reschedule(existingJob.JobID, spec, metadata)
 	}
 
-	// Create job object
-	job := &models.Job{
-		JobID: uuid.New().String(),
+	// Create new job
+	job := &Job{
+		JobID: uuid.New(),
 		Name:  name,
 		Spec:  spec,
-		Payload: models.JobPayload{
-			Type: models.TypeFunction,
+		Payload: JobPayload{
+			Type: TypeFunction,
 			Name: name,
 			Func: funcName,
 			Data: metadata,
 		},
-		Status: models.StatusScheduled,
+		Status: StatusScheduled,
 	}
 
-	if err := r.db.Create(job).Error; err != nil {
+	if err := s.storage.CreateJob(context.Background(), job); err != nil {
 		return nil, err
 	}
 
-	if err := r.scheduleJob(job); err != nil {
-		r.db.Delete(job)
+	if err := s.scheduleJob(job); err != nil {
+		s.storage.DeleteJob(context.Background(), job.JobID)
 		return nil, err
 	}
 
 	return job, nil
 }
 
-// Reschedule updates an existing job with new parameters
-func (r *Scheduler) Reschedule(identifier any, newSpec string, newMetadata map[string]any) (*models.Job, error) {
-	job, err := r.getJobByIdentifier(identifier)
+// Reschedule updates an existing job
+func (s *Scheduler) Reschedule(identifier any, newSpec string, newMetadata map[string]any) (*Job, error) {
+	job, err := s.getJobByIdentifier(identifier)
 	if err != nil {
 		return nil, err
 	}
 
-	// Validate new cron spec if it's being changed
+	// Validate new cron spec if changed
 	if newSpec != "" {
 		if _, err := cron.ParseStandard(newSpec); err != nil {
-			return nil, fmt.Errorf("invalid cron expression: %w", err)
+			return nil, err
 		}
 		job.Spec = newSpec
 	}
@@ -155,171 +165,151 @@ func (r *Scheduler) Reschedule(identifier any, newSpec string, newMetadata map[s
 	}
 
 	// Remove existing schedule
-	r.removeJobFromCron(job.ID)
+	s.removeJobFromCron(job.ID)
 
 	// Add new schedule
-	if err := r.scheduleJob(job); err != nil {
-		return nil, fmt.Errorf("failed to reschedule job: %w", err)
+	if err := s.scheduleJob(job); err != nil {
+		return nil, err
 	}
 
-	// Save updated job
-	if err := r.db.Save(job).Error; err != nil {
-		return nil, fmt.Errorf("failed to save job updates: %w", err)
+	// Save updates
+	if err := s.storage.UpdateJob(context.Background(), job); err != nil {
+		return nil, err
 	}
 
 	return job, nil
 }
 
-// Unschedule by either job ID or name
-func (r *Scheduler) Unschedule(identifier any) error {
-	job, err := r.getJobByIdentifier(identifier)
+// Unschedule removes a job
+func (s *Scheduler) Unschedule(identifier any) error {
+	job, err := s.getJobByIdentifier(identifier)
 	if err != nil {
 		return err
 	}
 
-	r.removeJobFromCron(job.ID)
+	s.removeJobFromCron(job.ID)
 
-	r.funcMu.Lock()
-	delete(r.funcMap, job.Payload.Func)
-	r.funcMu.Unlock()
+	s.funcMu.Lock()
+	delete(s.funcMap, job.Payload.Func)
+	s.funcMu.Unlock()
 
-	return r.db.Delete(job).Error
+	return s.storage.DeleteJob(context.Background(), job.JobID)
 }
 
 // RunNow executes a job immediately
-func (r *Scheduler) RunNow(identifier any) error {
-	job, err := r.getJobByIdentifier(identifier)
+func (s *Scheduler) RunNow(identifier any) error {
+	job, err := s.getJobByIdentifier(identifier)
 	if err != nil {
 		return err
 	}
 
-	jobLock := r.getJobLock(job.ID)
+	jobLock := s.getJobLock(job.ID)
 	jobLock.Lock()
 	defer jobLock.Unlock()
 
-	if job.Status == models.StatusRunning {
-		return fmt.Errorf("job %s is already running", job.Name)
+	if job.Status == StatusRunning {
+		return ErrJobAlreadyRunning
 	}
 
 	select {
-	case r.jobChannel <- struct{}{}:
+	case s.jobChannel <- struct{}{}:
 		go func() {
-			defer func() { <-r.jobChannel }()
-			r.createJobFunc(job)()
+			defer func() { <-s.jobChannel }()
+			s.createJobFunc(job)()
 		}()
 		return nil
 	default:
-		return fmt.Errorf("concurrency limit reached, try again later")
+		return ErrConcurrencyLimit
 	}
 }
 
-// GetJob returns a job by either ID or name
-func (r *Scheduler) GetJob(identifier any) (*models.Job, error) {
-	return r.getJobByIdentifier(identifier)
+// GetJob retrieves a job by ID or name
+func (s *Scheduler) GetJob(identifier any) (*Job, error) {
+	return s.getJobByIdentifier(identifier)
 }
 
 // ListJobs returns all jobs
-func (r *Scheduler) ListJobs() ([]models.Job, error) {
-	var jobs []models.Job
-	err := r.db.Find(&jobs).Error
-	return jobs, err
+func (s *Scheduler) ListJobs() ([]Job, error) {
+	return s.storage.ListJobs(context.Background())
 }
 
-func (r *Scheduler) Stop() {
-	r.cron.Stop()
+// Stop shuts down the scheduler
+func (s *Scheduler) Stop() {
+	s.cron.Stop()
 }
 
-// Private methods
+// Private helper methods
 
-// getJobByIdentifier helper function to get job by either ID or name
-func (r *Scheduler) getJobByIdentifier(identifier any) (*models.Job, error) {
-	var job models.Job
-	var query *gorm.DB
-
+func (s *Scheduler) getJobByIdentifier(identifier any) (*Job, error) {
 	switch v := identifier.(type) {
 	case string:
 		// Try to parse as UUID first (job ID)
-		if _, err := uuid.Parse(v); err == nil {
-			query = r.db.Where("job_id = ?", v)
-		} else {
-			query = r.db.Where("name = ?", v)
+		if uuid, err := uuid.Parse(v); err == nil {
+			return s.storage.GetJobByJobID(context.Background(), uuid)
 		}
+		return s.storage.GetJobByName(context.Background(), v)
 	case uuid.UUID:
-		query = r.db.Where("job_id = ?", v.String())
+		return s.storage.GetJobByJobID(context.Background(), v)
 	default:
-		return nil, fmt.Errorf("invalid identifier type: %T", identifier)
+		return nil, ErrJobNotFound
 	}
-
-	if err := query.First(&job).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrJobNotFound
-		}
-		return nil, err
-	}
-
-	return &job, nil
 }
 
-func (r *Scheduler) registerFunction(name string, fn any) {
-	if reflect.TypeOf(fn).Kind() != reflect.Func {
-		panic("only functions can be registered")
-	}
-
-	r.funcMu.Lock()
-	defer r.funcMu.Unlock()
-	r.funcMap[name] = fn
+func (s *Scheduler) registerFunction(name string, fn any) {
+	s.funcMu.Lock()
+	defer s.funcMu.Unlock()
+	s.funcMap[name] = fn
 }
 
-func (r *Scheduler) restoreJobs() error {
-	var jobs []models.Job
-	if err := r.db.Order("created_at DESC").Find(&jobs).Error; err != nil {
+func (s *Scheduler) restoreJobs() error {
+	jobs, err := s.storage.ListJobs(context.Background())
+	if err != nil {
 		return err
 	}
 
 	seen := make(map[string]bool)
 	for _, job := range jobs {
 		if seen[job.Name] {
-			continue // Skip if job with same name already exists
+			continue
 		}
 		seen[job.Name] = true
 
-		if err := r.scheduleJob(&job); err != nil {
-			// Log error but continue
-			fmt.Printf("Failed to restore job %s: %v\n", job.Name, err)
+		if err := s.scheduleJob(&job); err != nil {
+			continue
 		}
 	}
 	return nil
 }
 
-func (r *Scheduler) scheduleJob(job *models.Job) error {
-	entryID, err := r.cron.AddFunc(job.Spec, r.createJobFunc(job))
+func (s *Scheduler) scheduleJob(job *Job) error {
+	entryID, err := s.cron.AddFunc(job.Spec, s.createJobFunc(job))
 	if err != nil {
 		return err
 	}
 
-	r.mapMutex.Lock()
-	r.jobMap[entryID] = job.ID
-	r.mapMutex.Unlock()
+	s.mapMutex.Lock()
+	s.jobMap[entryID] = job.ID
+	s.mapMutex.Unlock()
 
-	entry := r.cron.Entry(entryID)
+	entry := s.cron.Entry(entryID)
 	job.NextRun = entry.Next
-	return r.db.Save(job).Error
+	return s.storage.UpdateJob(context.Background(), job)
 }
 
-func (r *Scheduler) createJobFunc(job *models.Job) func() {
+func (s *Scheduler) createJobFunc(job *Job) func() {
 	return func() {
-		r.jobChannel <- struct{}{}
-		defer func() { <-r.jobChannel }()
+		s.jobChannel <- struct{}{}
+		defer func() { <-s.jobChannel }()
 
-		jobLock := r.getJobLock(job.ID)
+		jobLock := s.getJobLock(job.ID)
 		jobLock.Lock()
 		defer jobLock.Unlock()
 
 		ctx := context.Background()
 		now := time.Now()
-		job.Status = models.StatusRunning
+		job.Status = StatusRunning
 		job.LastRun = &now
-		r.db.WithContext(ctx).Save(job)
+		s.storage.UpdateJob(ctx, job)
 
 		start := time.Now()
 		var lastError error
@@ -329,37 +319,38 @@ func (r *Scheduler) createJobFunc(job *models.Job) func() {
 			job.RunCount++
 
 			if r := recover(); r != nil {
-				lastError = fmt.Errorf("job panicked: %v", r)
-				job.Status = models.StatusFailed
+				lastError = errors.New("job panicked")
+				job.Status = StatusFailed
 				job.FailCount++
 				job.LastError = lastError.Error()
 			} else if lastError != nil {
-				job.Status = models.StatusFailed
+				job.Status = StatusFailed
 				job.FailCount++
 				job.LastError = lastError.Error()
 			} else {
-				job.Status = models.StatusSuccess
+				job.Status = StatusSuccess
 				job.SuccessCount++
 			}
 
-			entryID := r.getEntryID(job.ID)
+			entryID := s.getEntryID(job.ID)
 			if entryID != 0 {
-				job.NextRun = r.cron.Entry(entryID).Next
+				nextRun := s.cron.Entry(entryID).Next
+				job.NextRun = nextRun
 			}
-			r.db.WithContext(ctx).Save(job)
+			s.storage.UpdateJob(ctx, job)
 		}()
 
-		r.funcMu.RLock()
-		fn, ok := r.funcMap[job.Payload.Func]
-		r.funcMu.RUnlock()
+		s.funcMu.RLock()
+		fn, ok := s.funcMap[job.Payload.Func]
+		s.funcMu.RUnlock()
 
 		if !ok {
 			lastError = ErrFunctionNotFound
 			return
 		}
 
-		if r.timeout > 0 {
-			ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+		if s.config.JobTimeout > 0 {
+			ctx, cancel := context.WithTimeout(ctx, s.config.JobTimeout)
 			defer cancel()
 
 			done := make(chan struct{})
@@ -379,21 +370,21 @@ func (r *Scheduler) createJobFunc(job *models.Job) func() {
 	}
 }
 
-func (r *Scheduler) removeJobFromCron(jobDBID uint) {
-	entryID := r.getEntryID(jobDBID)
+func (s *Scheduler) removeJobFromCron(jobID uint) {
+	entryID := s.getEntryID(jobID)
 	if entryID != 0 {
-		r.cron.Remove(entryID)
-		r.mapMutex.Lock()
-		delete(r.jobMap, entryID)
-		r.mapMutex.Unlock()
+		s.cron.Remove(entryID)
+		s.mapMutex.Lock()
+		delete(s.jobMap, entryID)
+		s.mapMutex.Unlock()
 	}
 }
 
-func (r *Scheduler) getEntryID(jobDBID uint) cron.EntryID {
-	r.mapMutex.RLock()
-	defer r.mapMutex.RUnlock()
+func (s *Scheduler) getEntryID(jobDBID uint) cron.EntryID {
+	s.mapMutex.RLock()
+	defer s.mapMutex.RUnlock()
 
-	for id, dbID := range r.jobMap {
+	for id, dbID := range s.jobMap {
 		if dbID == jobDBID {
 			return id
 		}
@@ -401,15 +392,14 @@ func (r *Scheduler) getEntryID(jobDBID uint) cron.EntryID {
 	return 0
 }
 
-func (r *Scheduler) getJobLock(jobID uint) *sync.Mutex {
-	r.jobLockMu.Lock()
-	defer r.jobLockMu.Unlock()
+func (s *Scheduler) getJobLock(jobID uint) *sync.Mutex {
+	s.jobLockMu.Lock()
+	defer s.jobLockMu.Unlock()
 
-	if r.jobLocks == nil {
-		r.jobLocks = make(map[uint]*sync.Mutex)
+	if lock, exists := s.jobLocks[jobID]; exists {
+		return lock
 	}
-	if _, ok := r.jobLocks[jobID]; !ok {
-		r.jobLocks[jobID] = &sync.Mutex{}
-	}
-	return r.jobLocks[jobID]
+	lock := &sync.Mutex{}
+	s.jobLocks[jobID] = lock
+	return lock
 }

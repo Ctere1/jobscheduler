@@ -2,14 +2,15 @@ package jobscheduler
 
 import "errors"
 
+// Error definitions for the job scheduler
 var (
-	ErrInvalidJobSpec       = errors.New("invalid job specification")
-	ErrJobNotFound          = errors.New("job not found")
-	ErrJobAlreadyExists     = errors.New("job already exists")
-	ErrJobTimeout           = errors.New("job execution timed out")
-	ErrFunctionNotFound     = errors.New("function not registered")
 	ErrJobNameEmpty         = errors.New("job name cannot be empty")
 	ErrJobFunctionNil       = errors.New("job function cannot be nil")
-	ErrJobFunctionInvalid   = errors.New("provided value is not a function")
+	ErrJobFunctionInvalid   = errors.New("job function must be a valid function")
 	ErrJobFunctionNameEmpty = errors.New("could not determine function name")
+	ErrJobNotFound          = errors.New("job not found")
+	ErrFunctionNotFound     = errors.New("function not registered")
+	ErrJobTimeout           = errors.New("job execution timed out")
+	ErrJobAlreadyRunning    = errors.New("job is already running")
+	ErrConcurrencyLimit     = errors.New("concurrency limit reached")
 )

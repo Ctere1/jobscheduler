@@ -1,0 +1,10 @@
+{{range .Jobs}}
+<div class="job-card job-{{.Status}}" 
+     hx-get="/jobs/{{.JobID}}" 
+     hx-target="#job-detail">
+    <strong>{{.Name}}</strong><br>
+    Status: {{.Status}}<br>
+    Next Run: {{.NextRun.Format "2006-01-02 15:04:05"}}<br>
+    <button hx-post="/api/jobs/{{.JobID}}/run">Run Now</button>
+</div>
+{{end}}
