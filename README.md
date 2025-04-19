@@ -69,23 +69,19 @@ func cleanupTask() {
 
 ### 1. Job Registration
 
-Jobs are registered with a name, cron spec, function, and optional metadata.  
-The function is registered using reflection and stored by name.
+Jobs are registered with a name, cron spec, function, and optional metadata. The function is registered using reflection and stored by name.
 
 ### 2. Persistence
 
-All jobs are persisted to the database (`gorm`-compatible) using the `Job` model.  
-On startup, jobs are restored and scheduled automatically.
+All jobs are persisted to the database (`gorm`-compatible) using the `Job` model.On startup, jobs are restored and scheduled automatically.
 
 ### 3. Concurrency Control
 
-Job concurrency is managed using a buffered channel (`chan struct{}`) as a **semaphore**.  
-This allows you to set the maximum number of parallel jobs via `MaxConcurrentJobs`.
+Job concurrency is managed using a buffered channel (`chan struct{}`) as a **semaphore**. This allows you to set the maximum number of parallel jobs via `MaxConcurrentJobs`.
 
 ### 4. Timeouts
 
-Jobs can have a maximum execution time.  
-If they exceed `JobTimeout`, they are marked as failed.
+Jobs can have a maximum execution time. If they exceed `JobTimeout`, they are marked as failed.
 
 ### 5. Rescheduling
 
@@ -113,13 +109,13 @@ scheduler, err := jobscheduler.New(db, jobscheduler.Config{
 
 | Method       | Description                                  |
 |--------------|----------------------------------------------|
-| Schedule     | Register a new job (or reschedule if exists) |
-| Reschedule   | Update the schedule and metadata             |
-| Unschedule   | Remove the job from DB and cron              |
-| RunNow       | Run job immediately                          |
-| ListJobs     | Retrieve all jobs                            |
-| GetJob       | Lookup job by ID or name                     |
-| Stop         | Stop the scheduler                           |
+| `Schedule`     | Register a new job (or reschedule if exists) |
+| `Reschedule`   | Update the schedule and metadata             |
+| `Unschedule`   | Remove the job from DB and cron              |
+| `RunNow`       | Run job immediately                          |
+| `ListJobs`     | Retrieve all jobs                            |
+| `GetJob`       | Lookup job by ID or name                     |
+| `Stop`         | Stop the scheduler                           |
 
 
 ## 🧩 Example: Multiple Jobs
