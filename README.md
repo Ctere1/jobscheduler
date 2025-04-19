@@ -97,11 +97,13 @@ scheduler, err := jobscheduler.New(db, jobscheduler.Config{
 
 ### Core Methods
 - `New(db *gorm.DB, config Config) (*Scheduler, error)`: Creates a new job scheduler instance.
-- `RegisterFunction(name string, fn any)`: Registers a function to be used as a job.
-- `Schedule(name, spec string, fn any, metadata map[string]any)`: Schedules a new job.
-- `Unschedule(jobID string)`: Removes a scheduled job.
+- `Schedule(name, spec string, function any, metadata map[string]any)`: Schedules a new job.
+- `Reschedule(identifier any, newSpec string, newMetadata map[string]any)`: Reschedules an existing job.
+- `Unschedule(identifier any)`: Unschedules a job.
+- `GetJob(identifier any)`: Retrieves a job by its identifier.
 - `ListJobs() ([]Job, error)`: Lists all scheduled jobs.
-- `Stop()`: Stops the scheduler gracefully
+- `RunNow(identifier any)`: Runs a job immediately.
+- `Stop()`: Stops the scheduler.
 
 ### Job Model
 

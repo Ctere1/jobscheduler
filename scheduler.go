@@ -35,6 +35,9 @@ func New(db *gorm.DB, config Config) (*Scheduler, error) {
 	if config.MaxConcurrentJobs <= 0 {
 		config.MaxConcurrentJobs = 10
 	}
+	if config.JobTimeout <= 0 {
+		config.JobTimeout = 30 * time.Second
+	}
 
 	if err := db.AutoMigrate(&models.Job{}); err != nil {
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
@@ -57,22 +60,12 @@ func New(db *gorm.DB, config Config) (*Scheduler, error) {
 	return r, nil
 }
 
-func (r *Scheduler) RegisterFunction(name string, fn any) {
-	if reflect.TypeOf(fn).Kind() != reflect.Func {
-		panic("only functions can be registered")
-	}
-
-	r.funcMu.Lock()
-	defer r.funcMu.Unlock()
-	r.funcMap[name] = fn
-}
-
-func (r *Scheduler) Schedule(name, spec string, fn any, metadata map[string]any) (*models.Job, error) {
+func (r *Scheduler) Schedule(name, spec string, function any, metadata map[string]any) (*models.Job, error) {
 	// Input validation
 	if name == "" {
 		return nil, ErrJobNameEmpty
 	}
-	if fn == nil {
+	if function == nil {
 		return nil, ErrJobFunctionNil
 	}
 
@@ -82,7 +75,7 @@ func (r *Scheduler) Schedule(name, spec string, fn any, metadata map[string]any)
 	}
 
 	// Get function info
-	funcValue := reflect.ValueOf(fn)
+	funcValue := reflect.ValueOf(function)
 	if funcValue.Kind() != reflect.Func {
 		return nil, ErrJobFunctionInvalid
 	}
@@ -93,7 +86,7 @@ func (r *Scheduler) Schedule(name, spec string, fn any, metadata map[string]any)
 	}
 
 	// Register function
-	r.RegisterFunction(funcName, fn)
+	r.registerFunction(funcName, function)
 
 	// Create job object
 	job := &models.Job{
@@ -121,19 +114,82 @@ func (r *Scheduler) Schedule(name, spec string, fn any, metadata map[string]any)
 	return job, nil
 }
 
-func (r *Scheduler) Unschedule(jobID string) error {
-	var job models.Job
-	if err := r.db.Where("job_id = ?", jobID).First(&job).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrJobNotFound
+// Reschedule updates an existing job with new parameters
+func (r *Scheduler) Reschedule(identifier any, newSpec string, newMetadata map[string]any) (*models.Job, error) {
+	job, err := r.getJobByIdentifier(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate new cron spec if it's being changed
+	if newSpec != "" {
+		if _, err := cron.ParseStandard(newSpec); err != nil {
+			return nil, fmt.Errorf("invalid cron expression: %w", err)
 		}
+		job.Spec = newSpec
+	}
+
+	// Update metadata if provided
+	if newMetadata != nil {
+		job.Payload.Data = newMetadata
+	}
+
+	// Remove existing schedule
+	r.removeJobFromCron(job.ID)
+
+	// Add new schedule
+	if err := r.scheduleJob(job); err != nil {
+		return nil, fmt.Errorf("failed to reschedule job: %w", err)
+	}
+
+	// Save updated job
+	if err := r.db.Save(job).Error; err != nil {
+		return nil, fmt.Errorf("failed to save job updates: %w", err)
+	}
+
+	return job, nil
+}
+
+// Unschedule by either job ID or name
+func (r *Scheduler) Unschedule(identifier any) error {
+	job, err := r.getJobByIdentifier(identifier)
+	if err != nil {
 		return err
 	}
 
 	r.removeJobFromCron(job.ID)
-	return r.db.Delete(&job).Error
+	return r.db.Delete(job).Error
 }
 
+// RunNow executes a job immediately
+func (r *Scheduler) RunNow(identifier any) error {
+	job, err := r.getJobByIdentifier(identifier)
+	if err != nil {
+		return err
+	}
+
+	if job.Status == models.StatusRunning {
+		return fmt.Errorf("job %s is already running", job.Name)
+	}
+
+	select {
+	case r.jobChannel <- struct{}{}:
+		go func() {
+			defer func() { <-r.jobChannel }()
+			r.createJobFunc(job)()
+		}()
+		return nil
+	default:
+		return fmt.Errorf("concurrency limit reached, try again later")
+	}
+}
+
+// GetJob returns a job by either ID or name
+func (r *Scheduler) GetJob(identifier any) (*models.Job, error) {
+	return r.getJobByIdentifier(identifier)
+}
+
+// ListJobs returns all jobs
 func (r *Scheduler) ListJobs() ([]models.Job, error) {
 	var jobs []models.Job
 	err := r.db.Find(&jobs).Error
@@ -145,6 +201,46 @@ func (r *Scheduler) Stop() {
 }
 
 // Private methods
+
+// getJobByIdentifier helper function to get job by either ID or name
+func (r *Scheduler) getJobByIdentifier(identifier any) (*models.Job, error) {
+	var job models.Job
+	var query *gorm.DB
+
+	switch v := identifier.(type) {
+	case string:
+		// Try to parse as UUID first (job ID)
+		if _, err := uuid.Parse(v); err == nil {
+			query = r.db.Where("job_id = ?", v)
+		} else {
+			query = r.db.Where("name = ?", v)
+		}
+	case uuid.UUID:
+		query = r.db.Where("job_id = ?", v.String())
+	default:
+		return nil, fmt.Errorf("invalid identifier type: %T", identifier)
+	}
+
+	if err := query.First(&job).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrJobNotFound
+		}
+		return nil, err
+	}
+
+	return &job, nil
+}
+
+func (r *Scheduler) registerFunction(name string, fn any) {
+	if reflect.TypeOf(fn).Kind() != reflect.Func {
+		panic("only functions can be registered")
+	}
+
+	r.funcMu.Lock()
+	defer r.funcMu.Unlock()
+	r.funcMap[name] = fn
+}
+
 func (r *Scheduler) restoreJobs() error {
 	var jobs []models.Job
 	if err := r.db.Find(&jobs).Error; err != nil {

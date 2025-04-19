@@ -98,7 +98,7 @@ func TestConcurrentJobExecution(t *testing.T) {
 		}
 
 		// Register and execute
-		scheduler.RegisterFunction(job.Payload.Func, trackFunc)
+		scheduler.registerFunction(job.Payload.Func, trackFunc)
 		scheduler.createJobFunc(job)()
 	}
 
@@ -154,7 +154,7 @@ func TestFunctionRegistration(t *testing.T) {
 	testFunc := func() {}
 
 	funcName := runtime.FuncForPC(reflect.ValueOf(testFunc).Pointer()).Name()
-	scheduler.RegisterFunction(funcName, testFunc)
+	scheduler.registerFunction(funcName, testFunc)
 
 	// Verify function was registered
 	scheduler.funcMu.RLock()
@@ -191,7 +191,7 @@ func TestJobExecution(t *testing.T) {
 		},
 	}
 
-	scheduler.RegisterFunction(job.Payload.Func, testFunc)
+	scheduler.registerFunction(job.Payload.Func, testFunc)
 	scheduler.createJobFunc(job)()
 
 	if !jobRan {
@@ -285,7 +285,7 @@ func TestLongRunningJobHandling(t *testing.T) {
 		},
 	}
 
-	scheduler.RegisterFunction(job.Payload.Func, longFunc)
+	scheduler.registerFunction(job.Payload.Func, longFunc)
 	scheduler.createJobFunc(job)()
 
 	// Verify job ran but didn't finish
@@ -380,7 +380,7 @@ func TestPanicRecovery(t *testing.T) {
 		},
 	}
 
-	scheduler.RegisterFunction(job.Payload.Func, panicFunc)
+	scheduler.registerFunction(job.Payload.Func, panicFunc)
 	scheduler.createJobFunc(job)()
 
 	// Verify job was marked as failed
