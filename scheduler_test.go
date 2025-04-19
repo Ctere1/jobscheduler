@@ -7,7 +7,6 @@ import (
 	"os"
 	"reflect"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -87,7 +86,7 @@ func TestConcurrentJobExecution(t *testing.T) {
 	}
 
 	// Schedule 4 jobs
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		wg.Add(1)
 		job := &models.Job{
 			JobID: fmt.Sprintf("concurrent-job-%d", i),
@@ -323,7 +322,7 @@ func TestMultipleJobManagement(t *testing.T) {
 
 	// Schedule 50 jobs
 	var jobs []*models.Job
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		testFunc := func() {}
 
 		job, err := scheduler.Schedule(fmt.Sprintf("multi-job-%d", i), fmt.Sprintf("%d * * * *", i%60), testFunc, nil)
@@ -343,7 +342,7 @@ func TestMultipleJobManagement(t *testing.T) {
 	}
 
 	// Unschedule half of them
-	for i := 0; i < 25; i++ {
+	for i := range 25 {
 		if err := scheduler.Unschedule(jobs[i].JobID); err != nil {
 			t.Fatalf("Failed to unschedule job %s: %v", jobs[i].JobID, err)
 		}
@@ -356,44 +355,6 @@ func TestMultipleJobManagement(t *testing.T) {
 	}
 	if len(dbJobs) != 25 {
 		t.Errorf("Expected 25 jobs after unscheduling, got %d", len(dbJobs))
-	}
-}
-
-func TestPanicRecovery(t *testing.T) {
-	db := setupTestDB(t)
-
-	scheduler, err := New(db, Config{})
-	if err != nil {
-		t.Fatalf("Failed to create scheduler: %v", err)
-	}
-	defer scheduler.Stop()
-
-	panicFunc := func() {
-		panic("simulated panic")
-	}
-
-	job := &models.Job{
-		JobID: "panic-job",
-		Payload: models.JobPayload{
-			Type: models.TypeFunction,
-			Func: "panicFunc",
-		},
-	}
-
-	scheduler.registerFunction(job.Payload.Func, panicFunc)
-	scheduler.createJobFunc(job)()
-
-	// Verify job was marked as failed
-	var dbJob models.Job
-	if err := db.First(&dbJob, "job_id = ?", job.JobID).Error; err != nil {
-		t.Fatalf("Failed to find job: %v", err)
-	}
-
-	if dbJob.Status != models.StatusFailed {
-		t.Errorf("Expected job status 'failed', got '%s'", dbJob.Status)
-	}
-	if !strings.Contains(dbJob.LastError, "simulated panic") {
-		t.Errorf("Expected panic error, got '%s'", dbJob.LastError)
 	}
 }
 

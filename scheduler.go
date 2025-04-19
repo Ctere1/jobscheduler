@@ -29,6 +29,8 @@ type Scheduler struct {
 	timeout    time.Duration
 	funcMap    map[string]any
 	funcMu     sync.RWMutex
+	jobLocks   map[uint]*sync.Mutex
+	jobLockMu  sync.Mutex
 }
 
 func New(db *gorm.DB, config Config) (*Scheduler, error) {
@@ -50,6 +52,7 @@ func New(db *gorm.DB, config Config) (*Scheduler, error) {
 		jobChannel: make(chan struct{}, config.MaxConcurrentJobs),
 		timeout:    config.JobTimeout,
 		funcMap:    make(map[string]any),
+		jobLocks:   make(map[uint]*sync.Mutex),
 	}
 
 	if err := r.restoreJobs(); err != nil {
@@ -87,6 +90,23 @@ func (r *Scheduler) Schedule(name, spec string, function any, metadata map[strin
 
 	// Register function
 	r.registerFunction(funcName, function)
+
+	// Check if job with same name already exists
+	existingJob, err := r.getJobByIdentifier(name)
+	if err == nil {
+		oldFuncName := existingJob.Payload.Func
+		if oldFuncName != funcName {
+			// Reschedule the job with new function
+			updatedJob, err := r.Reschedule(existingJob.JobID, spec, metadata)
+			if err == nil {
+				r.funcMu.Lock()
+				delete(r.funcMap, oldFuncName)
+				r.funcMu.Unlock()
+			}
+			return updatedJob, err
+		}
+		return r.Reschedule(existingJob.JobID, spec, metadata)
+	}
 
 	// Create job object
 	job := &models.Job{
@@ -158,6 +178,11 @@ func (r *Scheduler) Unschedule(identifier any) error {
 	}
 
 	r.removeJobFromCron(job.ID)
+
+	r.funcMu.Lock()
+	delete(r.funcMap, job.Payload.Func)
+	r.funcMu.Unlock()
+
 	return r.db.Delete(job).Error
 }
 
@@ -167,6 +192,10 @@ func (r *Scheduler) RunNow(identifier any) error {
 	if err != nil {
 		return err
 	}
+
+	jobLock := r.getJobLock(job.ID)
+	jobLock.Lock()
+	defer jobLock.Unlock()
 
 	if job.Status == models.StatusRunning {
 		return fmt.Errorf("job %s is already running", job.Name)
@@ -243,13 +272,20 @@ func (r *Scheduler) registerFunction(name string, fn any) {
 
 func (r *Scheduler) restoreJobs() error {
 	var jobs []models.Job
-	if err := r.db.Find(&jobs).Error; err != nil {
+	if err := r.db.Order("created_at DESC").Find(&jobs).Error; err != nil {
 		return err
 	}
 
+	seen := make(map[string]bool)
 	for _, job := range jobs {
+		if seen[job.Name] {
+			continue // Skip if job with same name already exists
+		}
+		seen[job.Name] = true
+
 		if err := r.scheduleJob(&job); err != nil {
-			continue
+			// Log error but continue
+			fmt.Printf("Failed to restore job %s: %v\n", job.Name, err)
 		}
 	}
 	return nil
@@ -274,6 +310,10 @@ func (r *Scheduler) createJobFunc(job *models.Job) func() {
 	return func() {
 		r.jobChannel <- struct{}{}
 		defer func() { <-r.jobChannel }()
+
+		jobLock := r.getJobLock(job.ID)
+		jobLock.Lock()
+		defer jobLock.Unlock()
 
 		ctx := context.Background()
 		now := time.Now()
@@ -319,6 +359,9 @@ func (r *Scheduler) createJobFunc(job *models.Job) func() {
 		}
 
 		if r.timeout > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+			defer cancel()
+
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
@@ -327,7 +370,7 @@ func (r *Scheduler) createJobFunc(job *models.Job) func() {
 
 			select {
 			case <-done:
-			case <-time.After(r.timeout):
+			case <-ctx.Done():
 				lastError = ErrJobTimeout
 			}
 		} else {
@@ -356,4 +399,17 @@ func (r *Scheduler) getEntryID(jobDBID uint) cron.EntryID {
 		}
 	}
 	return 0
+}
+
+func (r *Scheduler) getJobLock(jobID uint) *sync.Mutex {
+	r.jobLockMu.Lock()
+	defer r.jobLockMu.Unlock()
+
+	if r.jobLocks == nil {
+		r.jobLocks = make(map[uint]*sync.Mutex)
+	}
+	if _, ok := r.jobLocks[jobID]; !ok {
+		r.jobLocks[jobID] = &sync.Mutex{}
+	}
+	return r.jobLocks[jobID]
 }
